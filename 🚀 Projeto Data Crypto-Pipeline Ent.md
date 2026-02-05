@@ -133,7 +133,7 @@ Um aviso de "não entre". Diz ao Airflow para não tentar agendar o script de ex
 
 ----------
 
-## 💡 6. Por que fizemos assim?
+## 💡 6. Decisões de Projeto:
 
 -   **Por que não salvar direto no banco?** Se o banco de dados falhar, perdemos o dado. Salvando no Storage primeiro (Data Lake), temos um backup eterno do dado bruto.
     
