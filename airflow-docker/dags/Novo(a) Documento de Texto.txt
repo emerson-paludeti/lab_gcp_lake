@@ -1,0 +1,312 @@
+📕 PROJETO: PIPELINE DE ENGENHARIA DE DADOS (GCP + DOCKER + AIRFLOW)
+☁️ FASE 1: CONFIGURAÇÃO DA NUVEM (GOOGLE CLOUD PLATFORM)
+1. Criação do Projeto
+
+Acesse console.cloud.google.com.
+
+Crie um novo projeto com o ID: lab-dados-gcp.
+
+2. Habilitação de APIs
+
+Vá em APIs e Serviços > Biblioteca.
+
+Pesquise e ative: "Cloud Storage JSON API".
+
+Pesquise e ative: "BigQuery API".
+
+3. Criação de Credenciais (Service Account)
+
+Vá em IAM e Administração > Contas de Serviço.
+
+Clique em + CRIAR CONTA DE SERVIÇO.
+
+Nome: airflow-admin.
+
+Permissões (Roles):
+
+Storage Admin (Administrador do Storage).
+
+BigQuery Admin (Administrador do BigQuery).
+
+Clique em Concluir.
+
+4. Baixar a Chave de Acesso
+
+Clique no e-mail da conta criada (airflow-admin@...).
+
+Vá na aba CHAVES.
+
+Clique em Adicionar Chave > Criar nova chave (JSON).
+
+O arquivo será baixado. Renomeie para: credentials.json.
+
+5. Configurar Storage (Data Lake)
+
+Vá em Cloud Storage > Buckets.
+
+Crie um bucket chamado: lab-dados-gcp-raw.
+
+Região: US.
+
+6. Configurar BigQuery (Data Warehouse)
+
+Vá em BigQuery.
+
+Crie um conjunto de dados (Dataset) chamado: crypto_analytics.
+
+Região: US.
+
+🐳 FASE 2: AMBIENTE LOCAL (DOCKER)
+1. Estrutura de Pastas Crie uma pasta airflow-docker e organize assim:
+
+Plaintext
+airflow-docker/
+├── dags/                  (Coloque o credentials.json AQUI)
+├── logs/
+├── plugins/
+├── requirements.txt
+├── Dockerfile
+└── docker-compose.yaml
+2. Arquivo requirements.txt
+
+Plaintext
+apache-airflow-providers-google
+3. Arquivo Dockerfile
+
+Dockerfile
+FROM apache/airflow:2.10.2
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+4. Arquivo docker-compose.yaml (Configuração Essencial)
+
+YAML
+version: '3.8'
+services:
+  airflow-webserver:
+    build: .
+    user: "50000:0"  # <--- CRÍTICO: Permissão de usuário
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    volumes:
+      - ./dags:/opt/airflow/dags  # <--- CRÍTICO: Espelhamento de pasta
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+    ports:
+      - "8080:8080"
+    command: webserver
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      - postgres
+
+  airflow-scheduler:
+    build: .
+    user: "50000:0"
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+    command: scheduler
+    depends_on:
+      - postgres
+
+  airflow-triggerer:
+    build: .
+    user: "50000:0"
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    volumes:
+      - ./dags:/opt/airflow/dags
+    command: triggerer
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:13
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+⚙️ FASE 3: INICIALIZAÇÃO
+Rode no terminal dentro da pasta airflow-docker:
+
+Construir Imagem: docker compose build
+
+Iniciar Banco: docker compose up airflow-init
+
+Subir Serviços: docker compose up -d
+
+🐍 FASE 4: SCRIPTS PYTHON (PASTA dags)
+1. Arquivo: dags/pipeline_oficial.py (Lógica ELT)
+
+Python
+import requests
+import json
+import time
+import os
+from google.cloud import storage
+from google.cloud import bigquery
+
+# CONFIGURAÇÃO DE AMBIENTE E CREDENCIAIS
+# Caminho absoluto para funcionar dentro do Docker
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/opt/airflow/dags/credentials.json"
+BUCKET_NAME = 'lab-dados-gcp-raw'
+DATASET_NAME = 'crypto_analytics'
+
+def extract_data():
+    """Extrai dados da API pública CoinCap"""
+    url = "https://api.coincap.io/v2/assets"
+    try:
+        response = requests.get(url)
+        response.raise_for_status() # Garante que erro 404/500 pare o script
+        data = response.json()['data']
+        print(f"Extração: {len(data)} registros encontrados.")
+        return data
+    except Exception as e:
+        print(f"Erro Crítico na API: {e}")
+        return []
+
+def save_to_storage(data):
+    """Salva no Google Cloud Storage em formato NDJSON"""
+    client = storage.Client()
+    bucket = client.bucket(BUCKET_NAME)
+    
+    timestamp = int(time.time())
+    file_name = f"coins_{timestamp}.json"
+    
+    # Conversão para NDJSON (Newline Delimited JSON)
+    # Formato: {"id": "btc"} \n {"id": "eth"}
+    ndjson_data = "\n".join([json.dumps(record) for record in data])
+    
+    blob = bucket.blob(file_name)
+    blob.upload_from_string(ndjson_data, content_type='application/json')
+    print(f"Upload realizado: gs://{BUCKET_NAME}/{file_name}")
+    return file_name
+
+def load_bronze(file_name):
+    """Carrega do Storage para BigQuery (Camada Bronze/Raw)"""
+    client = bigquery.Client()
+    table_id = f"{client.project}.{DATASET_NAME}.BRZ_assets"
+    
+    job_config = bigquery.LoadJobConfig(
+        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+        autodetect=True, # Detecta esquema automaticamente
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND # Adiciona dados sem apagar
+    )
+    
+    uri = f"gs://{BUCKET_NAME}/{file_name}"
+    load_job = client.load_table_from_uri(uri, table_id, job_config=job_config)
+    load_job.result() # Aguarda conclusão
+    print("Carga Bronze: Sucesso.")
+
+def process_silver_gold():
+    """Transformações ELT via SQL (Silver e Gold)"""
+    client = bigquery.Client()
+    
+    # --- CAMADA SILVER (Limpeza e Tipagem) ---
+    query_silver = f"""
+    CREATE OR REPLACE TABLE `{client.project}.{DATASET_NAME}.SLV_assets` AS
+    SELECT 
+        id, symbol, name, 
+        CAST(supply AS FLOAT64) as supply, 
+        CAST(maxSupply AS FLOAT64) as maxSupply, 
+        CAST(marketCapUsd AS FLOAT64) as marketCapUsd, 
+        CAST(volumeUsd24Hr AS FLOAT64) as volumeUsd24Hr, 
+        CAST(priceUsd AS FLOAT64) as priceUsd, 
+        CAST(changePercent24Hr AS FLOAT64) as changePercent24Hr, 
+        CURRENT_TIMESTAMP() as data_carga
+    FROM `{client.project}.{DATASET_NAME}.BRZ_assets`
+    """
+    client.query(query_silver).result()
+    print("Processamento Silver: Sucesso.")
+
+    # --- CAMADA GOLD (Agregação de Negócio) ---
+    query_gold = f"""
+    CREATE OR REPLACE TABLE `{client.project}.{DATASET_NAME}.GLD_market_summary` AS
+    SELECT 
+        CASE 
+            WHEN priceUsd > 1000 THEN 'Alto Valor'
+            WHEN priceUsd BETWEEN 100 AND 1000 THEN 'Médio Valor'
+            ELSE 'Baixo Valor'
+        END AS categoria_mercado,
+        COUNT(*) as qtd_ativos,
+        AVG(priceUsd) as preco_medio_usd,
+        SUM(marketCapUsd) as valor_mercado_total
+    FROM `{client.project}.{DATASET_NAME}.SLV_assets`
+    GROUP BY 1
+    ORDER BY 3 DESC
+    """
+    client.query(query_gold).result()
+    print("Processamento Gold: Sucesso.")
+
+if __name__ == "__main__":
+    dados = extract_data()
+    if dados:
+        arquivo_gerado = save_to_storage(dados)
+        load_bronze(arquivo_gerado)
+        process_silver_gold()
+2. Arquivo: dags/.airflowignore
+
+Plaintext
+pipeline_oficial.py
+3. Arquivo: dags/agendador_crypto.py (Orquestrador)
+
+Python
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from datetime import datetime, timedelta
+
+default_args = {
+    'owner': 'voce',
+    'depends_on_past': False,
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+}
+
+with DAG(
+    'pipeline_crypto_completo',
+    default_args=default_args,
+    description='ETL Cripto Diário',
+    schedule_interval='0 9 * * *', # 09:00 AM UTC
+    start_date=datetime(2024, 1, 1),
+    catchup=False,
+    tags=['crypto', 'producao'],
+) as dag:
+
+    # Tarefa: Rodar script Python isolado no container
+    rodar_etl = BashOperator(
+        task_id='rodar_script_python',
+        bash_command='python /opt/airflow/dags/pipeline_oficial.py'
+    )
+🕹️ FASE 5: COMANDOS DE OPERAÇÃO (TERMINAL VS CODE)
+Listar DAGs (Verificar se carregou): docker compose exec airflow-webserver airflow dags list
+
+Despausar DAG (Ativar): docker compose exec airflow-webserver airflow dags unpause pipeline_crypto_completo
+
+Executar Manualmente (Trigger): docker compose exec airflow-webserver airflow dags trigger pipeline_crypto_completo
+
+Parar tudo (Final do dia): docker compose down
+
+✅ FASE 6: VALIDAÇÃO FINAL (ONDE CHECAR)
+Airflow UI (localhost:8080):
+
+DAG pipeline_crypto_completo deve estar com status Success (Verde).
+
+Google Cloud Storage:
+
+No bucket lab-dados-gcp-raw, deve existir um arquivo coins_TIMESTAMP.json.
+
+Google BigQuery:
+
+Tabela BRZ_assets: Dados crus.
+
+Tabela SLV_assets: Colunas convertidas para FLOAT.
+
+Tabela GLD_market_summary: Dados agregados por categoria ("Alto Valor", etc).

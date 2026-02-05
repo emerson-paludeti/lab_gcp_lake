@@ -1,0 +1,17 @@
+# --- SEGURANÇA ---
+# Ignorar arquivos de credenciais do Google Cloud em qualquer pasta
+**credentials.json
+dags/credentials.json
+
+# --- AMBIENTE VIRTUAL E PYTHON ---
+__pycache__/
+*.pyc
+venv/
+.env
+
+# --- AIRFLOW E DOCKER ---
+logs/
+plugins/
+airflow.db
+airflow-webserver.pid
+.DS_Store

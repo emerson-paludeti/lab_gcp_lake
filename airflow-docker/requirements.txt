@@ -1,0 +1,5 @@
+apache-airflow-providers-google
+google-cloud-storage
+google-cloud-bigquery
+requests
+pandas
